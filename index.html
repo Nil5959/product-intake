@@ -136,7 +136,16 @@ tbody tr:hover td{background:color-mix(in srgb,var(--soft) 55%,transparent)}
 .star:hover{background:var(--soft)}
 .star.on{color:#d79a00}
 .notes{height:36px;min-height:36px;padding:8px 10px;resize:vertical;line-height:1.4;font-family:inherit}
-.drop.need{border-color:var(--bad);color:var(--bad)}
+/* type = blue, model = amber, so the two levels never look alike */
+:root{--cat:#1650d0;--cat-bg:#eef3ff;--mod:#a85a00;--mod-bg:#fff4e2}
+.cat{border-inline-start:4px solid var(--cat);background:var(--cat-bg);border-radius:var(--r);padding:14px}
+.cat-head .lbl span,.model-head .lbl span{font-weight:600;font-size:12.5px}
+.cat-head .lbl span{color:var(--cat)}
+.cat-in:not(:focus){box-shadow:0 0 0 1.5px var(--cat)}
+.model{border-inline-start:4px solid var(--mod)}
+.model-head{background:var(--mod-bg);border-radius:10px;padding:8px 10px}
+.model-head .lbl span{color:var(--mod)}
+.model-in:not(:focus){box-shadow:0 0 0 1.5px var(--mod)}
 .foot{margin-top:20px;border:0;background:transparent;padding:0}
 .empty.card{margin-bottom:16px}
 .shake{animation:shake .35s;box-shadow:0 0 0 2px var(--bad)!important}
