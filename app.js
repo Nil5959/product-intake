@@ -277,6 +277,7 @@
 
   // ---------- actions ----------
   async function addRow(category, model, focus){
+    document.activeElement?.blur?.(); // Safari does not move focus to a clicked button; a focused name field would hold the redraw
     try{
       const before = new Set(docs.map(d => d.id));
       await call({ action:'add', category, model }); render(); updateState();
