@@ -183,7 +183,7 @@
       return `<div class="thumb"><a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="תמונה ${k+1}" loading="lazy"></a>` +
         `<button class="x" type="button" data-f="${esc(im.f)}" aria-label="הסרת תמונה ${k+1}">✕</button></div>`;
     }).join('') + Array.from({length: up}, () => `<div class="thumb up">מעלה…</div>`).join('') +
-      `<button class="drop${imgs.length || up ? '' : ' wide need'}" type="button" aria-label="הוספת תמונות">${imgs.length || up ? '+' : '+ תמונה (חובה)'}</button>`;
+      `<button class="drop${imgs.length || up ? '' : ' wide'}" type="button" aria-label="הוספת תמונות">${imgs.length || up ? '+' : '+ תמונה (מומלץ)'}</button>`;
     box.querySelector('.drop').addEventListener('click', () => { fileTarget = d.id; fileEl.value = ''; fileEl.click(); });
     box.querySelectorAll('.x').forEach(b => b.addEventListener('click', () => removeImg(d.id, b.dataset.f)));
   }
