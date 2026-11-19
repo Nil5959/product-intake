@@ -70,7 +70,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--soft) 55%,transparent)}
 .cell::placeholder{color:var(--faint);opacity:.75}
 .cell.ltr{direction:ltr;text-align:left}
 .price{position:relative}
-.price .cell{padding-inline-start:26px;font-variant-numeric:tabular-nums;direction:ltr;text-align:right}
+.price .cell{padding-right:26px;font-variant-numeric:tabular-nums;direction:ltr;text-align:right}
 .price span{position:absolute;inset-inline-start:10px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none}
 .go{display:inline-block;margin-top:5px;font-size:12px;color:var(--link);text-decoration:none}
 .go:hover{text-decoration:underline}
@@ -96,7 +96,7 @@ tbody tr:hover td{background:color-mix(in srgb,var(--soft) 55%,transparent)}
 
 .empty{padding:44px 20px;text-align:center;color:var(--faint);line-height:1.7}
 .empty strong{display:block;color:var(--text);font-size:16px;margin-bottom:4px}
-.note{margin:16px 0 0;padding:12px 14px;border-radius:var(--r);background:var(--soft);color:var(--quiet);line-height:1.6}
+.note{white-space:pre-line;margin:16px 0 0;padding:12px 14px;border-radius:var(--r);background:var(--soft);color:var(--quiet);line-height:1.6}
 .how{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:0 0 20px;padding:0;list-style:none;counter-reset:s}
 .how li{counter-increment:s;background:var(--soft);border-radius:var(--r);padding:12px 14px;color:var(--quiet);line-height:1.5;font-size:13.5px}
 .how li::before{content:counter(s);display:inline-grid;place-items:center;width:20px;height:20px;border-radius:6px;background:var(--pri);color:var(--pri-t);
@@ -164,6 +164,6 @@ tbody tr:hover td{background:color-mix(in srgb,var(--soft) 55%,transparent)}
   <input type="file" id="file" accept="image/*" multiple hidden>
 </main>
 
-<script src="app.js?v=1"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

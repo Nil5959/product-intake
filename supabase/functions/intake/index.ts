@@ -26,6 +26,7 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return fail("method", 405);
 
   // Body: text/plain JSON for actions, multipart for uploads (both "simple" requests: no preflight, keepalive works).
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BYTES + 64 * 1024) return fail("toolarge", 413);
   let p: Record<string, unknown> = {}, file: File | null = null;
   try {
     if ((req.headers.get("content-type") ?? "").startsWith("multipart/form-data")) {
@@ -37,11 +38,12 @@ Deno.serve(async (req) => {
 
   if (p.action === "ping") { // keep-alive from the GitHub cron, so the free project never pauses
     const { error } = await db.from("clients").select("id", { head: true, count: "exact" });
-    return out({ ok: !error });
+    return error ? fail("db", 500) : out({ ok: true });
   }
   const k = String(p.k ?? "");
   if (k.length < 32 || k.length > 128) return fail("auth", 401);
-  const { data: cl } = await db.from("clients").select("id,display").eq("token_hash", await sha256(k)).maybeSingle();
+  const { data: cl, error: clErr } = await db.from("clients").select("id,display").eq("token_hash", await sha256(k)).maybeSingle();
+  if (clErr) return fail("db", 500);
   if (!cl) return fail("auth", 401);
   const client = cl.id as string;
 
@@ -79,25 +81,33 @@ Deno.serve(async (req) => {
 
     case "update": {
       const f = String(p.field ?? ""), v = String(p.value ?? "");
+      const t = Math.floor(Number(p.t)); // client time of the edit: an older save arriving late never overwrites a newer one
+      if (!Number.isSafeInteger(t) || t <= 0) return fail("t");
       let patch: Record<string, unknown>;
       if (f === "name") patch = { name: clean(v, 200) };
-      else if (f === "link") patch = { link: clean(v, 1000) };
-      else if (f === "price") {
+      else if (f === "link") {
+        const l = clean(v, 1000);
+        if (l && !/^https?:\/\/[^\s]+$/i.test(l)) return fail("link");
+        patch = { link: l };
+      } else if (f === "price") {
         const n = Number(v);
-        patch = { price: v.trim() === "" || !isFinite(n) ? null : Math.max(0, Math.min(10000000, Math.round(n * 100) / 100)) };
+        if (v.trim() !== "" && !isFinite(n)) return fail("price");
+        patch = { price: v.trim() === "" ? null : Math.max(0, Math.min(10000000, Math.round(n * 100) / 100)) };
       } else return fail("field");
-      const { data, error } = await db.from("products").update({ ...patch, updated_at: new Date().toISOString() })
-        .eq("id", id).eq("client", client).select("id");
+      const { data, error } = await db.from("products").update({ ...patch, [f + "_t"]: t, updated_at: new Date().toISOString() })
+        .eq("id", id).eq("client", client).lt(f + "_t", t).select("id");
       if (error) return fail("db", 500);
-      if (!data?.length) return fail("notfound", 404);
+      if (!data?.length && !(await own())) return fail("notfound", 404);
       return out({ ok: true }); // no list here: keeps keepalive saves cheap
     }
 
     case "delete": {
       if (!(await own())) return list();
-      const { data: imgs } = await db.from("images").select("path").eq("product_id", id);
+      const { data: imgs, error: e1 } = await db.from("images").select("path").eq("product_id", id);
+      if (e1) return fail("db", 500);
+      const { error: e2 } = await db.from("products").delete().eq("id", id).eq("client", client); // images rows cascade
+      if (e2) return fail("db", 500);
       if (imgs?.length) await db.storage.from("intake").remove(imgs.map((i) => i.path));
-      await db.from("products").delete().eq("id", id).eq("client", client);
       return list();
     }
 
@@ -106,7 +116,11 @@ Deno.serve(async (req) => {
       const f = String(p.f ?? "");
       if (!UUID.test(f)) return fail("id");
       const { data: im } = await db.from("images").select("path").eq("id", f).eq("product_id", id).maybeSingle();
-      if (im) { await db.storage.from("intake").remove([im.path]); await db.from("images").delete().eq("id", f); }
+      if (im) {
+        const { error } = await db.from("images").delete().eq("id", f);
+        if (error) return fail("db", 500);
+        await db.storage.from("intake").remove([im.path]);
+      }
       return list();
     }
 

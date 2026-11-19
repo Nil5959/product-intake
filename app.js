@@ -4,7 +4,10 @@
   const API = 'https://hoowmkrwokdlbfwovvqn.supabase.co/functions/v1/intake';
   const ERR = {toolarge:'התמונה גדולה מדי.', notimage:'לא הצלחתי לקרוא את הקובץ כתמונה. נסה JPG או PNG.', toomany:'אפשר עד 30 תמונות למוצר.', full:'הרשימה מלאה. כתוב לניל.'};
   let docs = [], uploading = {}, pendingDel = null, fileTarget = null;
-  const timers = {}; // key id|field -> {id, f, v, t}
+  const failed = []; // upload errors stay on screen until the page is reloaded
+  // Text edits: every edit stays in `pending` until the server confirms that exact edit. Nothing is dropped on failure.
+  const pending = {}; // key "id|field" -> {id, f, v, t, timer}
+  let saveFailed = false, retryTimer = null;
 
   // The secret key comes from the link (#k=...). It is kept in this browser so a bookmark without it still works.
   let K = new URLSearchParams(location.hash.slice(1)).get('k') || '';
@@ -17,6 +20,7 @@
   function fixLink(v){ v = v.trim(); return v && !/^[a-z]+:/i.test(v) ? 'https://' + v : v; }
 
   // One request at a time, so saves land in order.
+  // Row/image actions go one at a time. Text saves do not wait behind them (an upload can take long).
   let q = Promise.resolve();
   function call(fields, file){ const p = q.then(() => send(fields, file)); q = p.catch(() => {}); return p; }
   async function send(fields, file, keepalive){
@@ -43,7 +47,7 @@
       tr.querySelector('.num').textContent = i + 1;
       for(const f of ['name','link','price']){
         const inp = tr.querySelector(`[data-f="${f}"]`);
-        if(document.activeElement !== inp && !timers[d.id+'|'+f]) inp.value = d[f] ?? '';
+        if(document.activeElement !== inp && !pending[d.id+'|'+f]) inp.value = d[f] ?? '';
       }
       const href = safeUrl(d.link), go = tr.querySelector('.go');
       go.hidden = !href; if(href) go.href = href;
@@ -61,12 +65,12 @@
       <td data-l="שם המוצר"><input class="cell" id="n-${id}" data-f="name" placeholder="למשל: כיסא אוכל עץ אלון" maxlength="200" aria-label="שם המוצר"></td>
       <td data-l="קישור לאתר שמוכר אותו"><input class="cell ltr" id="l-${id}" data-f="link" type="url" inputmode="url" placeholder="https://" maxlength="1000" aria-label="קישור לאתר שמוכר אותו">
         <a class="go" target="_blank" rel="noopener noreferrer" hidden>פתיחת הקישור ↗</a></td>
-      <td class="c-price" data-l="מחיר מכירה"><div class="price"><span>₪</span><input class="cell" id="p-${id}" data-f="price" type="number" inputmode="decimal" min="0" step="1" placeholder="0" aria-label="מחיר מכירה בשקלים"></div></td>
+      <td class="c-price" data-l="מחיר מכירה"><div class="price"><span>₪</span><input class="cell" id="p-${id}" data-f="price" type="text" inputmode="decimal" placeholder="0" maxlength="12" aria-label="מחיר מכירה בשקלים"></div></td>
       <td class="c-img" data-l="תמונות"><div class="imgs"></div></td>
       <td class="c-del"></td>`;
     tr.querySelectorAll('[data-f]').forEach(inp => {
       inp.addEventListener('input', () => queueSave(id, inp.dataset.f, inp.value));
-      inp.addEventListener('blur', () => flush(id + '|' + inp.dataset.f));
+      inp.addEventListener('blur', () => saveNow(id + '|' + inp.dataset.f));
     });
     tr.addEventListener('dragover', e => { if(e.dataTransfer && [...e.dataTransfer.types].includes('Files')){ e.preventDefault(); tr.querySelector('.drop')?.classList.add('on'); } });
     tr.addEventListener('dragleave', () => tr.querySelector('.drop')?.classList.remove('on'));
@@ -105,32 +109,61 @@
     }
   }
 
+  function cleanPrice(v){ return String(v).replace(/[^\d.]/g, ''); } // "1,500 ₪" -> "1500"
+  function value(p){ return p.f === 'link' ? fixLink(p.v) : p.f === 'price' ? cleanPrice(p.v) : p.v; }
+  function updateState(){
+    const ups = Object.values(uploading).some(n => n > 0), n = Object.keys(pending).length;
+    if(saveFailed && n) setState('לא נשמר עדיין · מנסה שוב', 'bad');
+    else if(n || ups) setState('שומר…');
+    else setState('נשמר', 'ok');
+  }
   function queueSave(id, f, v){
-    setState('שומר…');
-    const key = id + '|' + f;
-    clearTimeout(timers[key]?.t);
-    timers[key] = { id, f, v, t: setTimeout(() => flush(key), 700) };
+    const key = id + '|' + f, old = pending[key];
+    if(old) clearTimeout(old.timer);
+    const p = pending[key] = { id, f, v, t: Date.now() };
+    p.timer = setTimeout(() => saveNow(key), 700);
+    updateState();
     if(f === 'link'){ const go = rowsEl.querySelector(`tr[data-id="${id}"] .go`); const href = safeUrl(fixLink(v)); go.hidden = !href; if(href) go.href = href; }
   }
-  function body(p){ return { action:'update', id:p.id, field:p.f, value: p.f === 'link' ? fixLink(p.v) : p.v }; }
-  async function flush(key){
-    const p = timers[key]; if(!p) return;
-    clearTimeout(p.t); delete timers[key];
+  async function saveNow(key){
+    const p = pending[key]; if(!p || p.sending) return;
+    clearTimeout(p.timer); p.sending = true;
     try{
-      await call(body(p));
-      const d = docs.find(x => x.id === p.id); if(d) d[p.f] = p.f === 'price' ? (p.v === '' ? null : Number(p.v)) : body(p).value;
-      if(!Object.keys(timers).length) setState('נשמר', 'ok');
-      note(''); render();
-    }catch(e){ setState('לא נשמר', 'bad'); note('השינוי לא נשמר. בדוק שיש אינטרנט וכתוב שוב.'); }
+      await send({ action:'update', id:p.id, field:p.f, value:value(p), t:p.t }, null, true);
+      p.sending = false;
+      if(pending[key] === p){ // nothing newer was typed meanwhile
+        delete pending[key];
+        const d = docs.find(x => x.id === p.id), v = value(p);
+        if(d) d[p.f] = p.f === 'price' ? (v === '' ? null : Number(v)) : v;
+      }
+      saveFailed = false; updateState();
+      if(pending[key]) saveNow(key);
+    }catch(e){
+      p.sending = false;
+      if(['notfound','link','price','field','t'].includes(e.code)){ // retrying will not help
+        if(pending[key] === p) delete pending[key];
+        if(e.code === 'link') note('הקישור לא תקין. העתק את הקישור המלא מהדפדפן.');
+        if(e.code === 'price') note('המחיר לא תקין. כתוב רק מספר, למשל 1500.');
+        updateState(); return;
+      }
+      saveFailed = true; updateState();
+      clearTimeout(retryTimer); retryTimer = setTimeout(retryAll, 3000);
+    }
   }
-  // Leaving the page or switching apps: send what is still waiting right away, with keepalive so it survives the tab closing.
+  function retryAll(){ for(const key in pending) saveNow(key); }
+  window.addEventListener('online', retryAll);
+  // Leaving the page or switching apps: send everything still waiting right now, with keepalive so it survives the tab closing.
+  // The server keeps only the newest edit per field (by time), so sending twice is harmless.
   function flushNow(){
-    for(const key in timers){ const p = timers[key]; clearTimeout(p.t); delete timers[key]; send(body(p), null, true).catch(() => {}); }
+    for(const key in pending){
+      const p = pending[key]; clearTimeout(p.timer);
+      send({ action:'update', id:p.id, field:p.f, value:value(p), t:p.t }, null, true).catch(() => {});
+    }
   }
-  document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') flushNow(); });
+  document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') flushNow(); else retryAll(); });
   window.addEventListener('pagehide', flushNow);
   window.addEventListener('beforeunload', e => {
-    const busy = Object.keys(uploading).some(k => uploading[k] > 0);
+    const busy = Object.values(uploading).some(n => n > 0) || Object.keys(pending).length > 0;
     flushNow();
     if(busy){ e.preventDefault(); e.returnValue = ''; }
   });
@@ -138,7 +171,7 @@
   async function addRow(){
     try{
       const before = new Set(docs.map(d => d.id));
-      await call({ action:'add' }); render(); setState('נשמר', 'ok');
+      await call({ action:'add' }); render(); updateState();
       const fresh = docs.find(d => !before.has(d.id));
       if(fresh) setTimeout(() => document.getElementById('n-' + fresh.id)?.focus(), 50);
     }catch(e){ note(ERR[e.code] || 'לא הצלחתי להוסיף שורה. נסה שוב.'); }
@@ -146,7 +179,8 @@
 
   async function removeRow(id){
     pendingDel = null;
-    try{ await call({ action:'delete', id }); setState('נמחק', 'ok'); }
+    for(const key in pending) if(pending[key].id === id){ clearTimeout(pending[key].timer); delete pending[key]; }
+    try{ await call({ action:'delete', id }); updateState(); }
     catch(e){ note('המחיקה לא הצליחה. נסה שוב.'); }
     render();
   }
@@ -169,15 +203,17 @@
   async function upload(id, files){
     const list = [...(files||[])].filter(f => /^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif|gif)$/i.test(f.name));
     if(!list.length) return;
-    uploading[id] = (uploading[id]||0) + list.length; render();
+    uploading[id] = (uploading[id]||0) + list.length; render(); updateState();
     for(const f of list){
       try{
         if(f.size > 60*1024*1024) throw { code:'toolarge' };
         const jpg = await toJpeg(f);
-        await call({ action:'upload', id, name: f.name.replace(/\.[^.]+$/, '') + '.jpg' }, jpg);
-        setState('נשמר', 'ok');
-      }catch(e){ note(`${f.name}: ${ERR[e.code] || 'לא הצלחתי להעלות. נסה שוב.'}`); }
-      finally{ uploading[id]--; render(); }
+        for(let n = 0; ; n++){
+          try{ await call({ action:'upload', id, name: f.name.replace(/\.[^.]+$/, '') + '.jpg' }, jpg); break; }
+          catch(e){ if(n >= 2 || (e.code !== 'net' && e.code !== 'db' && e.code !== 'storage')) throw e; await new Promise(r => setTimeout(r, 2000 * (n + 1))); }
+        }
+      }catch(e){ failed.push(`${f.name}: ${ERR[e.code] || 'לא עלתה. נסה להעלות אותה שוב.'}`); note(failed.join('\n')); }
+      finally{ uploading[id]--; render(); updateState(); }
     }
   }
 
