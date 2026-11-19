@@ -54,7 +54,7 @@ Deno.serve(async (req) => {
     return !!data;
   }
   async function list() {
-    const { data: prods, error } = await db.from("products").select("id,category,model,name,link,price,notes,is_main,created_at,images(id,path,orig,created_at)")
+    const { data: prods, error } = await db.from("products").select("id,cat_id,model_id,category,model,name,link,price,notes,is_main,created_at,images(id,path,orig,created_at)")
       .eq("client", client).order("created_at").order("created_at", { referencedTable: "images" });
     if (error) return fail("db", 500);
     const paths = prods.flatMap((x) => x.images.map((i) => i.path));
@@ -64,7 +64,7 @@ Deno.serve(async (req) => {
       for (const u of s ?? []) if (u.path && u.signedUrl) urls[u.path] = u.signedUrl;
     }
     return out({ ok: true, who: cl!.display, products: prods.map((x) => ({
-      id: x.id, category: x.category, model: x.model, name: x.name, link: x.link, notes: x.notes, main: x.is_main,
+      id: x.id, cat: x.cat_id, mod: x.model_id, category: x.category, model: x.model, name: x.name, link: x.link, notes: x.notes, main: x.is_main,
       price: x.price === null ? null : Number(x.price),
       images: x.images.map((i) => ({ f: i.id, orig: i.orig, url: urls[i.path] ?? "" })),
     })) });
@@ -76,8 +76,11 @@ Deno.serve(async (req) => {
     case "add": {
       const { count } = await db.from("products").select("id", { count: "exact", head: true }).eq("client", client);
       if ((count ?? 0) >= MAX_PRODUCTS) return fail("full");
-      // "add a variation to this model": type and model come prefilled
-      const { error } = await db.from("products").insert({ client, category: clean(p.category, 120), model: clean(p.model, 120) });
+      // Groups are fixed ids, not names: "+ model in this type" passes cat, "+ variation" passes cat and mod.
+      const row: Record<string, unknown> = { client, category: clean(p.category, 120), model: clean(p.model, 120) };
+      if (UUID.test(String(p.cat ?? ""))) row.cat_id = p.cat;
+      if (UUID.test(String(p.mod ?? ""))) row.model_id = p.mod;
+      const { error } = await db.from("products").insert(row);
       return error ? fail("db", 500) : list();
     }
 
@@ -101,7 +104,12 @@ Deno.serve(async (req) => {
       const { data, error } = await db.from("products").update({ ...patch, [f + "_t"]: t, updated_at: new Date().toISOString() })
         .eq("id", id).eq("client", client).lt(f + "_t", t).select("id");
       if (error) return fail("db", 500);
-      if (!data?.length && !(await own())) return fail("notfound", 404);
+      if (!data?.length) { // nothing written: row gone, a duplicate, or a newer edit is already there
+        const { data: cur } = await db.from("products").select(f + "_t").eq("id", id).eq("client", client).maybeSingle();
+        if (!cur) return fail("notfound", 404);
+        const st = Number((cur as Record<string, unknown>)[f + "_t"]);
+        if (st !== t) return out({ ok: false, error: "stale", t: st }, 409); // the page resends with a later time
+      }
       return out({ ok: true }); // no list here: keeps keepalive saves cheap
     }
 

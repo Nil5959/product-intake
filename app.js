@@ -4,10 +4,11 @@
   const treeEl = $('#tree'), emptyEl = $('#empty'), stateEl = $('#state'), msgEl = $('#msg'), countEl = $('#count'), fileEl = $('#file'), catsEl = $('#cats');
   const API = 'https://hoowmkrwokdlbfwovvqn.supabase.co/functions/v1/intake';
   const ERR = {toolarge:'התמונה גדולה מדי.', notimage:'לא הצלחתי לקרוא את הקובץ כתמונה. נסה JPG או PNG.', toomany:'אפשר עד 30 תמונות לווריאציה.', full:'הרשימה מלאה. כתוב לניל.'};
-  let docs = [], uploading = {}, pendingDel = null, fileTarget = null, dirty = false;
+  let docs = [], uploading = {}, pendingDel = null, fileTarget = null;
   const failed = []; // upload errors stay on screen until the page is reloaded
   // Text edits: every edit stays in `pending` until the server confirms that exact edit. Nothing is dropped on failure.
   const pending = {}; // key "id|field" -> {id, f, v, t, timer}
+  const acked = {};   // key -> {id, f, v, at}: last confirmed edit, guards against an older list response
   let saveFailed = false, retryTimer = null;
 
   // The secret key comes from the link (#k=...). It is kept in this browser so a bookmark without it still works.
@@ -28,11 +29,13 @@
     let body;
     if(file){ body = new FormData(); for(const k in fields) body.append(k, fields[k] ?? ''); body.append('k', K); body.append('file', file, fields.name || 'image.jpg'); }
     else body = JSON.stringify({ ...fields, k: K }); // sent as text/plain: no CORS preflight, works with keepalive
-    let j = null;
+    let j = null; const t0 = performance.now();
     try{ const r = await fetch(API, { method:'POST', body, cache:'no-store', keepalive: !!keepalive }); j = await r.json(); }catch(e){}
-    if(!j || !j.ok) throw { code: j && j.error || 'net' };
+    if(!j || !j.ok) throw { code: j && j.error || 'net', t: j && j.t };
     if(j.products){
       docs = j.products;
+      // A list read on the server can be older than edits saved meanwhile: re-apply those, then what is still waiting.
+      for(const key in acked){ const a = acked[key], d = docs.find(x => x.id === a.id); if(a.at > t0 && d) d[a.f] = a.v; }
       for(const key in pending){ const p = pending[key], d = docs.find(x => x.id === p.id); if(d) d[p.f] = p.v; } // what was typed wins over the server copy
       if(j.who) $('#hi').textContent = 'היי ' + j.who;
     }
@@ -40,26 +43,19 @@
   }
 
   // ---------- grouping ----------
-  // A blank type or model name keeps the row on its own; same names group together.
+  // Groups are fixed ids (cat, mod) from the server, so renaming or clearing a name never splits or merges groups.
   function groups(){
     const cats = [], byCat = {};
     for(const d of docs){
-      const ck = d.category.trim() ? 'v:' + d.category.trim() : 'id:' + d.id;
-      let c = byCat[ck]; if(!c){ c = byCat[ck] = { key: d.id, name: d.category, models: [], byModel: {} }; cats.push(c); }
-      const mk = d.model.trim() ? 'v:' + d.model.trim() : 'id:' + d.id;
-      let m = c.byModel[mk]; if(!m){ m = c.byModel[mk] = { key: d.id, name: d.model, rows: [] }; c.models.push(m); }
+      let c = byCat[d.cat]; if(!c){ c = byCat[d.cat] = { key: d.cat, name: d.category, models: [], byModel: {} }; cats.push(c); }
+      let m = c.byModel[d.mod]; if(!m){ m = c.byModel[d.mod] = { key: d.mod, name: d.model, rows: [] }; c.models.push(m); }
       m.rows.push(d);
     }
     return cats;
   }
   function mainOf(m){ return m.rows.find(d => d.main) || m.rows[0]; } // none marked: the first one is the main
 
-  function headerFocused(){ const a = document.activeElement; return a && a.closest && a.closest('.cat-head,.model-head') && treeEl.contains(a); }
-  treeEl.addEventListener('focusout', () => setTimeout(() => { if(dirty && !headerFocused()) render(); }, 0));
-
   function render(){
-    if(headerFocused()){ dirty = true; return; } // regrouping while typing a type/model name would move the field away
-    dirty = false;
     const cats = groups();
     emptyEl.hidden = docs.length > 0;
     const models = cats.reduce((n,c) => n + c.models.length, 0), imgs = docs.reduce((n,d) => n + d.images.length, 0), noImg = docs.filter(d => !d.images.length).length;
@@ -81,8 +77,7 @@
         if(box.children[mi] !== card) box.insertBefore(card, box.children[mi] || null);
         card._ids = m.rows.map(d => d.id);
         setVal(card.querySelector('.model-in'), m.name);
-        const named = !!(c.name.trim() && m.name.trim());
-        card.querySelector('.model-hint').hidden = named;
+        card.querySelector('.model-hint').hidden = !!m.name.trim();
         const main = mainOf(m), vars = card.querySelector('.vars');
         m.rows.forEach((d, i) => {
           keepR.add(d.id);
@@ -96,7 +91,6 @@
     treeEl.querySelectorAll('article.model').forEach(a => { if(!keepM.has(a.dataset.k)) a.remove(); });
     treeEl.querySelectorAll('section.cat').forEach(s => { if(!keepC.has(s.dataset.k)) s.remove(); });
   }
-  function need(inp){ inp.focus(); inp.classList.remove('shake'); void inp.offsetWidth; inp.classList.add('shake'); }
   function setVal(inp, v){ if(document.activeElement !== inp) inp.value = v ?? ''; }
 
   function buildCat(key){
@@ -106,15 +100,11 @@
       <div class="cat-head">
         <label class="lbl"><span>סוג הכיסא</span><input class="cell cat-in" list="cats" maxlength="120" placeholder="למשל: כיסאות בר"></label>
         <button class="btn add-model" type="button">+ דגם בסוג הזה</button>
-        <span class="hint cat-hint">כתוב קודם את סוג הכיסא</span>
+        <span class="hint cat-hint">חסר סוג הכיסא</span>
       </div>
       <div class="models"></div>`;
     headerInput(sec.querySelector('.cat-in'), sec, 'category');
-    sec.querySelector('.add-model').onclick = () => {
-      const c = sec.querySelector('.cat-in').value.trim();
-      if(!c) return need(sec.querySelector('.cat-in'));
-      addRow(c, '', 'model');
-    };
+    sec.querySelector('.add-model').onclick = () => addRow({ cat: key, category: sec.querySelector('.cat-in').value.trim() }, 'model');
     return sec;
   }
   function buildModel(key){
@@ -124,23 +114,21 @@
       <div class="model-head">
         <label class="lbl"><span>דגם</span><input class="cell model-in" maxlength="120" placeholder="שם הדגם"></label>
         <button class="btn add-var" type="button">+ וריאציה</button>
-        <span class="hint model-hint">כתוב קודם את שם הדגם</span>
+        <span class="hint model-hint">חסר שם הדגם</span>
       </div>
       <div class="var var-head" aria-hidden="true"><span>ראשית</span><span>וריאציה</span><span>קישור לאתר שמוכר אותה</span><span>מחיר מכירה</span><span>תמונות</span><span>הערות</span><span></span></div>
       <div class="vars"></div>`;
     headerInput(a.querySelector('.model-in'), a, 'model');
     a.querySelector('.add-var').onclick = () => {
-      const ci = a.closest('section.cat').querySelector('.cat-in'), mi = a.querySelector('.model-in');
-      if(!ci.value.trim()) return need(ci);
-      if(!mi.value.trim()) return need(mi);
-      addRow(ci.value.trim(), mi.value.trim(), 'name');
+      const sec = a.closest('section.cat');
+      addRow({ cat: sec.dataset.k, category: sec.querySelector('.cat-in').value.trim(), mod: key, model: a.querySelector('.model-in').value.trim() }, 'name');
     };
     return a;
   }
   // A type/model name lives on every variation under it, so editing the header saves it on all of them.
   function headerInput(inp, el, f){
     inp.addEventListener('input', () => { for(const id of el._ids || []){ const d = docs.find(x => x.id === id); if(d) d[f] = inp.value; queueSave(id, f, inp.value); } });
-    inp.addEventListener('blur', () => { for(const id of el._ids || []) saveNow(id + '|' + f); });
+    inp.addEventListener('blur', () => { for(const id of el._ids || []) saveNow(id + '|' + f); render(); });
   }
 
   function buildRow(id){
@@ -216,7 +204,7 @@
   }
 
   // ---------- saving ----------
-  function cleanPrice(v){ return String(v).replace(/[^\d.]/g, ''); } // "1,500 ₪" -> "1500"
+  function cleanPrice(v){ return String(v).replace(/[₪,\s]/g, ''); } // "1,500 ₪" -> "1500"; "1500-1800" stays and is refused
   function value(p){ return p.f === 'link' ? fixLink(p.v) : p.f === 'price' ? cleanPrice(p.v) : p.v; }
   function updateState(){
     const ups = Object.values(uploading).some(n => n > 0), n = Object.keys(pending).length;
@@ -241,16 +229,19 @@
       if(pending[key] === p){ // nothing newer was typed meanwhile
         delete pending[key];
         const d = docs.find(x => x.id === p.id), v = value(p);
-        if(d) d[p.f] = p.f === 'price' ? (v === '' ? null : Number(v)) : v;
+        const dv = p.f === 'price' ? (v === '' ? null : Number(v)) : v;
+        if(d) d[p.f] = dv;
+        acked[key] = { id: p.id, f: p.f, v: dv, at: performance.now() };
       }
       saveFailed = false; updateState();
       if(pending[key]) saveNow(key);
     }catch(e){
       p.sending = false;
-      if(['notfound','link','price','field','t'].includes(e.code)){ // retrying will not help
+      if(e.code === 'stale' && pending[key] === p){ p.t = Math.max(Date.now(), (Number(e.t) || 0) + 1); return saveNow(key); } // a clock behind: this edit is still the newest one here
+      if(['notfound','link','price','field','t','stale'].includes(e.code)){ // retrying will not help
         if(pending[key] === p) delete pending[key];
         if(e.code === 'link') note('הקישור לא תקין. העתק את הקישור המלא מהדפדפן.');
-        if(e.code === 'price') note('המחיר לא תקין. כתוב רק מספר, למשל 1500.');
+        if(e.code === 'price') note('המחיר לא תקין. כתוב מספר אחד, למשל 1500. טווח או הסבר אפשר לכתוב בהערות.');
         updateState(); return;
       }
       saveFailed = true; updateState();
@@ -276,11 +267,11 @@
   });
 
   // ---------- actions ----------
-  async function addRow(category, model, focus){
+  async function addRow(fields, focus){
     document.activeElement?.blur?.(); // Safari does not move focus to a clicked button; a focused name field would hold the redraw
     try{
       const before = new Set(docs.map(d => d.id));
-      await call({ action:'add', category, model }); render(); updateState();
+      await call({ action:'add', ...fields }); render(); updateState();
       const fresh = docs.find(d => !before.has(d.id)); if(!fresh) return;
       setTimeout(() => {
         const row = treeEl.querySelector(`.var[data-id="${fresh.id}"]`);
@@ -297,13 +288,16 @@
     for(const x of docs) if(ids.includes(x.id)) x.main = x.id === id; // show it right away
     render();
     try{ await call({ action:'main', id, ids: ids.join(',') }); render(); }
-    catch(e){ note('לא הצלחתי לסמן את הווריאציה הראשית. נסה שוב.'); }
+    catch(e){ note('לא הצלחתי לסמן את הווריאציה הראשית. נסה שוב.'); try{ await call({ action:'list' }); }catch(_){} render(); }
   }
 
   async function removeRow(id){
     pendingDel = null;
-    for(const key in pending) if(pending[key].id === id){ clearTimeout(pending[key].timer); delete pending[key]; }
-    try{ await call({ action:'delete', id }); updateState(); }
+    try{
+      await call({ action:'delete', id });
+      for(const key in pending) if(pending[key].id === id){ clearTimeout(pending[key].timer); delete pending[key]; }
+      updateState();
+    }
     catch(e){ note('המחיקה לא הצליחה. נסה שוב.'); }
     render();
   }
@@ -346,7 +340,7 @@
   }
 
   fileEl.addEventListener('change', () => { if(fileTarget) upload(fileTarget, fileEl.files); });
-  $('#add').onclick = $('#add2').onclick = () => addRow('', '', 'category');
+  $('#add').onclick = $('#add2').onclick = () => addRow({}, 'category');
 
   (async function start(){
     if(!K){ setState('אין גישה', 'bad'); note('הקישור לא שלם. פתח את הקישור המלא שקיבלת מניל.'); return; }
