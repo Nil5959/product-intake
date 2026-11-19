@@ -1,9 +1,10 @@
 (function(){
+  // A tree: chair type -> model -> variations. Each variation is one row on the server (category, model, name, ...).
   const $ = s => document.querySelector(s);
-  const rowsEl = $('#rows'), emptyEl = $('#empty'), stateEl = $('#state'), msgEl = $('#msg'), countEl = $('#count'), fileEl = $('#file');
+  const treeEl = $('#tree'), emptyEl = $('#empty'), stateEl = $('#state'), msgEl = $('#msg'), countEl = $('#count'), fileEl = $('#file'), catsEl = $('#cats');
   const API = 'https://hoowmkrwokdlbfwovvqn.supabase.co/functions/v1/intake';
-  const ERR = {toolarge:'התמונה גדולה מדי.', notimage:'לא הצלחתי לקרוא את הקובץ כתמונה. נסה JPG או PNG.', toomany:'אפשר עד 30 תמונות למוצר.', full:'הרשימה מלאה. כתוב לניל.'};
-  let docs = [], uploading = {}, pendingDel = null, fileTarget = null;
+  const ERR = {toolarge:'התמונה גדולה מדי.', notimage:'לא הצלחתי לקרוא את הקובץ כתמונה. נסה JPG או PNG.', toomany:'אפשר עד 30 תמונות לווריאציה.', full:'הרשימה מלאה. כתוב לניל.'};
+  let docs = [], uploading = {}, pendingDel = null, fileTarget = null, dirty = false;
   const failed = []; // upload errors stay on screen until the page is reloaded
   // Text edits: every edit stays in `pending` until the server confirms that exact edit. Nothing is dropped on failure.
   const pending = {}; // key "id|field" -> {id, f, v, t, timer}
@@ -18,8 +19,8 @@
   function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function safeUrl(u){ try{ const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; }catch(e){ return ''; } }
   function fixLink(v){ v = v.trim(); return v && !/^[a-z]+:/i.test(v) ? 'https://' + v : v; }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  // One request at a time, so saves land in order.
   // Row/image actions go one at a time. Text saves do not wait behind them (an upload can take long).
   let q = Promise.resolve();
   function call(fields, file){ const p = q.then(() => send(fields, file)); q = p.catch(() => {}); return p; }
@@ -27,59 +28,164 @@
     let body;
     if(file){ body = new FormData(); for(const k in fields) body.append(k, fields[k] ?? ''); body.append('k', K); body.append('file', file, fields.name || 'image.jpg'); }
     else body = JSON.stringify({ ...fields, k: K }); // sent as text/plain: no CORS preflight, works with keepalive
-    let r, j = null;
-    try{ r = await fetch(API, { method:'POST', body, cache:'no-store', keepalive: !!keepalive }); j = await r.json(); }catch(e){}
+    let j = null;
+    try{ const r = await fetch(API, { method:'POST', body, cache:'no-store', keepalive: !!keepalive }); j = await r.json(); }catch(e){}
     if(!j || !j.ok) throw { code: j && j.error || 'net' };
-    if(j.products){ docs = j.products; if(j.who) $('#hi').textContent = 'היי ' + j.who; }
+    if(j.products){
+      docs = j.products;
+      for(const key in pending){ const p = pending[key], d = docs.find(x => x.id === p.id); if(d) d[p.f] = p.v; } // what was typed wins over the server copy
+      if(j.who) $('#hi').textContent = 'היי ' + j.who;
+    }
     return j;
   }
 
+  // ---------- grouping ----------
+  // A blank type or model name keeps the row on its own; same names group together.
+  function groups(){
+    const cats = [], byCat = {};
+    for(const d of docs){
+      const ck = d.category.trim() ? 'v:' + d.category.trim() : 'id:' + d.id;
+      let c = byCat[ck]; if(!c){ c = byCat[ck] = { key: d.id, name: d.category, models: [], byModel: {} }; cats.push(c); }
+      const mk = d.model.trim() ? 'v:' + d.model.trim() : 'id:' + d.id;
+      let m = c.byModel[mk]; if(!m){ m = c.byModel[mk] = { key: d.id, name: d.model, rows: [] }; c.models.push(m); }
+      m.rows.push(d);
+    }
+    return cats;
+  }
+  function mainOf(m){ return m.rows.find(d => d.main) || m.rows[0]; } // none marked: the first one is the main
+
+  function headerFocused(){ const a = document.activeElement; return a && a.closest && a.closest('.cat-head,.model-head') && treeEl.contains(a); }
+  treeEl.addEventListener('focusout', () => setTimeout(() => { if(dirty && !headerFocused()) render(); }, 0));
+
   function render(){
+    if(headerFocused()){ dirty = true; return; } // regrouping while typing a type/model name would move the field away
+    dirty = false;
+    const cats = groups();
     emptyEl.hidden = docs.length > 0;
-    const imgCount = docs.reduce((n,d) => n + (d.images||[]).length, 0);
-    countEl.textContent = docs.length ? `${docs.length} מוצרים · ${imgCount} תמונות` : '';
-    const seen = new Set();
-    docs.forEach((d, i) => {
-      seen.add(d.id);
-      let tr = rowsEl.querySelector(`tr[data-id="${d.id}"]`);
-      if(!tr) tr = buildRow(d.id);
-      if(rowsEl.children[i] !== tr) rowsEl.insertBefore(tr, rowsEl.children[i] || null);
-      tr.querySelector('.num').textContent = i + 1;
-      for(const f of ['name','link','price']){
-        const inp = tr.querySelector(`[data-f="${f}"]`);
-        if(document.activeElement !== inp && !pending[d.id+'|'+f]) inp.value = d[f] ?? '';
-      }
-      const href = safeUrl(d.link), go = tr.querySelector('.go');
-      go.hidden = !href; if(href) go.href = href;
-      renderImgs(tr, d);
-      renderDel(tr, d.id);
+    const models = cats.reduce((n,c) => n + c.models.length, 0), imgs = docs.reduce((n,d) => n + d.images.length, 0), noImg = docs.filter(d => !d.images.length).length;
+    countEl.textContent = docs.length ? `${models} דגמים · ${docs.length} וריאציות · ${imgs} תמונות` + (noImg ? ` · ${noImg} בלי תמונה` : '') : '';
+    catsEl.innerHTML = [...new Set(docs.map(d => d.category.trim()).filter(Boolean))].map(c => `<option value="${esc(c)}">`).join('');
+
+    const keepC = new Set(), keepM = new Set(), keepR = new Set();
+    cats.forEach((c, ci) => {
+      keepC.add(c.key);
+      const sec = treeEl.querySelector(`section[data-k="${c.key}"]`) || buildCat(c.key);
+      if(treeEl.children[ci] !== sec) treeEl.insertBefore(sec, treeEl.children[ci] || null);
+      sec._ids = c.models.flatMap(m => m.rows.map(d => d.id));
+      setVal(sec.querySelector('.cat-in'), c.name);
+      sec.querySelector('.cat-hint').hidden = !!c.name.trim();
+      const box = sec.querySelector('.models');
+      c.models.forEach((m, mi) => {
+        keepM.add(m.key);
+        const card = treeEl.querySelector(`article[data-k="${m.key}"]`) || buildModel(m.key);
+        if(box.children[mi] !== card) box.insertBefore(card, box.children[mi] || null);
+        card._ids = m.rows.map(d => d.id);
+        setVal(card.querySelector('.model-in'), m.name);
+        const named = !!(c.name.trim() && m.name.trim());
+        card.querySelector('.model-hint').hidden = named;
+        const main = mainOf(m), vars = card.querySelector('.vars');
+        m.rows.forEach((d, i) => {
+          keepR.add(d.id);
+          const row = treeEl.querySelector(`.var[data-id="${d.id}"]`) || buildRow(d.id);
+          if(vars.children[i] !== row) vars.insertBefore(row, vars.children[i] || null);
+          fillRow(row, d, d === main, m.rows.length);
+        });
+      });
     });
-    [...rowsEl.children].forEach(tr => { if(!seen.has(tr.dataset.id)) tr.remove(); });
+    treeEl.querySelectorAll('.var').forEach(r => { if(!keepR.has(r.dataset.id)) r.remove(); });
+    treeEl.querySelectorAll('article.model').forEach(a => { if(!keepM.has(a.dataset.k)) a.remove(); });
+    treeEl.querySelectorAll('section.cat').forEach(s => { if(!keepC.has(s.dataset.k)) s.remove(); });
+  }
+  function need(inp){ inp.focus(); inp.classList.remove('shake'); void inp.offsetWidth; inp.classList.add('shake'); }
+  function setVal(inp, v){ if(document.activeElement !== inp) inp.value = v ?? ''; }
+
+  function buildCat(key){
+    const sec = document.createElement('section');
+    sec.className = 'cat'; sec.dataset.k = key;
+    sec.innerHTML = `
+      <div class="cat-head">
+        <label class="lbl"><span>סוג הכיסא</span><input class="cell cat-in" list="cats" maxlength="120" placeholder="למשל: כיסאות בר"></label>
+        <button class="btn add-model" type="button">+ דגם בסוג הזה</button>
+        <span class="hint cat-hint">כתוב קודם את סוג הכיסא</span>
+      </div>
+      <div class="models"></div>`;
+    headerInput(sec.querySelector('.cat-in'), sec, 'category');
+    sec.querySelector('.add-model').onclick = () => {
+      const c = sec.querySelector('.cat-in').value.trim();
+      if(!c) return need(sec.querySelector('.cat-in'));
+      addRow(c, '', 'model');
+    };
+    return sec;
+  }
+  function buildModel(key){
+    const a = document.createElement('article');
+    a.className = 'model'; a.dataset.k = key;
+    a.innerHTML = `
+      <div class="model-head">
+        <label class="lbl"><span>דגם</span><input class="cell model-in" maxlength="120" placeholder="שם הדגם"></label>
+        <button class="btn add-var" type="button">+ וריאציה</button>
+        <span class="hint model-hint">כתוב קודם את שם הדגם</span>
+      </div>
+      <div class="var var-head" aria-hidden="true"><span>ראשית</span><span>וריאציה</span><span>קישור לאתר שמוכר אותה</span><span>מחיר מכירה</span><span>תמונות</span><span>הערות</span><span></span></div>
+      <div class="vars"></div>`;
+    headerInput(a.querySelector('.model-in'), a, 'model');
+    a.querySelector('.add-var').onclick = () => {
+      const ci = a.closest('section.cat').querySelector('.cat-in'), mi = a.querySelector('.model-in');
+      if(!ci.value.trim()) return need(ci);
+      if(!mi.value.trim()) return need(mi);
+      addRow(ci.value.trim(), mi.value.trim(), 'name');
+    };
+    return a;
+  }
+  // A type/model name lives on every variation under it, so editing the header saves it on all of them.
+  function headerInput(inp, el, f){
+    inp.addEventListener('input', () => { for(const id of el._ids || []){ const d = docs.find(x => x.id === id); if(d) d[f] = inp.value; queueSave(id, f, inp.value); } });
+    inp.addEventListener('blur', () => { for(const id of el._ids || []) saveNow(id + '|' + f); });
   }
 
   function buildRow(id){
-    const tr = document.createElement('tr');
-    tr.dataset.id = id;
-    tr.innerHTML = `
-      <td class="num"></td>
-      <td data-l="שם המוצר"><input class="cell" id="n-${id}" data-f="name" placeholder="למשל: כיסא אוכל עץ אלון" maxlength="200" aria-label="שם המוצר"></td>
-      <td data-l="קישור לאתר שמוכר אותו"><input class="cell ltr" id="l-${id}" data-f="link" type="url" inputmode="url" placeholder="https://" maxlength="1000" aria-label="קישור לאתר שמוכר אותו">
-        <a class="go" target="_blank" rel="noopener noreferrer" hidden>פתיחת הקישור ↗</a></td>
-      <td class="c-price" data-l="מחיר מכירה"><div class="price"><span>₪</span><input class="cell" id="p-${id}" data-f="price" type="text" inputmode="decimal" placeholder="0" maxlength="12" aria-label="מחיר מכירה בשקלים"></div></td>
-      <td class="c-img" data-l="תמונות"><div class="imgs"></div></td>
-      <td class="c-del"></td>`;
-    tr.querySelectorAll('[data-f]').forEach(inp => {
-      inp.addEventListener('input', () => queueSave(id, inp.dataset.f, inp.value));
+    const row = document.createElement('div');
+    row.className = 'var'; row.dataset.id = id;
+    row.innerHTML = `
+      <div class="c-main"><button class="star" type="button" aria-label="וריאציה ראשית">☆</button></div>
+      <label data-l="וריאציה"><input class="cell" id="n-${id}" data-f="name" placeholder="צבע, בד, גובה…" maxlength="200" aria-label="שם הווריאציה"></label>
+      <label data-l="קישור לאתר שמוכר אותה"><input class="cell ltr" data-f="link" type="url" inputmode="url" placeholder="https://" maxlength="1000" aria-label="קישור לאתר שמוכר אותה">
+        <a class="go" target="_blank" rel="noopener noreferrer" hidden>פתיחת הקישור ↗</a></label>
+      <label data-l="מחיר מכירה"><div class="price"><span>₪</span><input class="cell" data-f="price" type="text" inputmode="decimal" placeholder="0" maxlength="12" aria-label="מחיר מכירה בשקלים"></div></label>
+      <div class="c-img" data-l="תמונות"><div class="imgs"></div></div>
+      <label data-l="הערות"><textarea class="cell notes" data-f="notes" rows="1" maxlength="2000" placeholder="מה חשוב שנדע" aria-label="הערות לווריאציה"></textarea></label>
+      <div class="c-del"></div>`;
+    row.querySelectorAll('[data-f]').forEach(inp => {
+      inp.addEventListener('input', () => { queueSave(id, inp.dataset.f, inp.value); if(inp.tagName === 'TEXTAREA') grow(inp); });
       inp.addEventListener('blur', () => saveNow(id + '|' + inp.dataset.f));
     });
-    tr.addEventListener('dragover', e => { if(e.dataTransfer && [...e.dataTransfer.types].includes('Files')){ e.preventDefault(); tr.querySelector('.drop')?.classList.add('on'); } });
-    tr.addEventListener('dragleave', () => tr.querySelector('.drop')?.classList.remove('on'));
-    tr.addEventListener('drop', e => { e.preventDefault(); tr.querySelector('.drop')?.classList.remove('on'); upload(id, e.dataTransfer.files); });
-    return tr;
+    row.querySelector('.star').onclick = () => setMain(id, row.closest('article.model')._ids);
+    row.addEventListener('dragover', e => { if(e.dataTransfer && [...e.dataTransfer.types].includes('Files')){ e.preventDefault(); row.querySelector('.drop')?.classList.add('on'); } });
+    row.addEventListener('dragleave', () => row.querySelector('.drop')?.classList.remove('on'));
+    row.addEventListener('drop', e => { e.preventDefault(); row.querySelector('.drop')?.classList.remove('on'); upload(id, e.dataTransfer.files); });
+    return row;
+  }
+  function grow(t){ t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight + 2, 240) + 'px'; }
+
+  function fillRow(row, d, isMain, count){
+    for(const f of ['name','link','price','notes']){
+      const inp = row.querySelector(`[data-f="${f}"]`);
+      if(document.activeElement !== inp && !pending[d.id+'|'+f]){ inp.value = d[f] ?? ''; if(f === 'notes') grow(inp); }
+    }
+    const href = safeUrl(fixLink(d.link || '')), go = row.querySelector('.go');
+    go.hidden = !href; if(href) go.href = href;
+    const star = row.querySelector('.star');
+    star.textContent = isMain ? '★' : '☆';
+    star.classList.toggle('on', isMain);
+    star.title = isMain ? 'זו הווריאציה הראשית של הדגם' : 'לסמן כווריאציה הראשית';
+    star.setAttribute('aria-pressed', isMain);
+    row.classList.toggle('is-main', isMain && count > 1);
+    renderImgs(row, d);
+    renderDel(row, d.id);
   }
 
-  function renderImgs(tr, d){
-    const box = tr.querySelector('.imgs');
+  function renderImgs(row, d){
+    const box = row.querySelector('.imgs');
     const imgs = d.images || [], up = uploading[d.id] || 0;
     const key = imgs.map(x => x.f).join(',') + '|' + up;
     if(box.dataset.key === key) return;
@@ -89,13 +195,13 @@
       return `<div class="thumb"><a href="${esc(src)}" target="_blank" rel="noopener noreferrer"><img src="${esc(src)}" alt="תמונה ${k+1}" loading="lazy"></a>` +
         `<button class="x" type="button" data-f="${esc(im.f)}" aria-label="הסרת תמונה ${k+1}">✕</button></div>`;
     }).join('') + Array.from({length: up}, () => `<div class="thumb up">מעלה…</div>`).join('') +
-      `<button class="drop${imgs.length ? '' : ' wide'}" type="button" aria-label="הוספת תמונות">${imgs.length ? '+' : '+ תמונות'}</button>`;
+      `<button class="drop${imgs.length || up ? '' : ' wide need'}" type="button" aria-label="הוספת תמונות">${imgs.length || up ? '+' : '+ תמונה (חובה)'}</button>`;
     box.querySelector('.drop').addEventListener('click', () => { fileTarget = d.id; fileEl.value = ''; fileEl.click(); });
     box.querySelectorAll('.x').forEach(b => b.addEventListener('click', () => removeImg(d.id, b.dataset.f)));
   }
 
-  function renderDel(tr, id){
-    const td = tr.querySelector('.c-del');
+  function renderDel(row, id){
+    const td = row.querySelector('.c-del');
     const mode = pendingDel === id ? 'ask' : 'btn';
     if(td.dataset.mode === mode) return;
     td.dataset.mode = mode;
@@ -104,11 +210,12 @@
       td.querySelector('[data-a=yes]').onclick = () => removeRow(id);
       td.querySelector('[data-a=no]').onclick = () => { pendingDel = null; render(); };
     } else {
-      td.innerHTML = `<button class="del" type="button" aria-label="מחיקת המוצר">🗑</button>`;
+      td.innerHTML = `<button class="del" type="button" aria-label="מחיקת הווריאציה">🗑</button>`;
       td.querySelector('.del').onclick = () => { pendingDel = id; render(); };
     }
   }
 
+  // ---------- saving ----------
   function cleanPrice(v){ return String(v).replace(/[^\d.]/g, ''); } // "1,500 ₪" -> "1500"
   function value(p){ return p.f === 'link' ? fixLink(p.v) : p.f === 'price' ? cleanPrice(p.v) : p.v; }
   function updateState(){
@@ -123,7 +230,7 @@
     const p = pending[key] = { id, f, v, t: Date.now() };
     p.timer = setTimeout(() => saveNow(key), 700);
     updateState();
-    if(f === 'link'){ const go = rowsEl.querySelector(`tr[data-id="${id}"] .go`); const href = safeUrl(fixLink(v)); go.hidden = !href; if(href) go.href = href; }
+    if(f === 'link'){ const go = treeEl.querySelector(`.var[data-id="${id}"] .go`); const href = safeUrl(fixLink(v)); go.hidden = !href; if(href) go.href = href; }
   }
   async function saveNow(key){
     const p = pending[key]; if(!p || p.sending) return;
@@ -168,13 +275,28 @@
     if(busy){ e.preventDefault(); e.returnValue = ''; }
   });
 
-  async function addRow(){
+  // ---------- actions ----------
+  async function addRow(category, model, focus){
     try{
       const before = new Set(docs.map(d => d.id));
-      await call({ action:'add' }); render(); updateState();
-      const fresh = docs.find(d => !before.has(d.id));
-      if(fresh) setTimeout(() => document.getElementById('n-' + fresh.id)?.focus(), 50);
-    }catch(e){ note(ERR[e.code] || 'לא הצלחתי להוסיף שורה. נסה שוב.'); }
+      await call({ action:'add', category, model }); render(); updateState();
+      const fresh = docs.find(d => !before.has(d.id)); if(!fresh) return;
+      setTimeout(() => {
+        const row = treeEl.querySelector(`.var[data-id="${fresh.id}"]`);
+        const el = focus === 'category' ? row?.closest('section.cat').querySelector('.cat-in')
+                 : focus === 'model' ? row?.closest('article.model').querySelector('.model-in')
+                 : document.getElementById('n-' + fresh.id);
+        el?.focus(); el?.scrollIntoView({ block:'center', behavior:'smooth' });
+      }, 50);
+    }catch(e){ note(ERR[e.code] || 'לא הצלחתי להוסיף. נסה שוב.'); }
+  }
+
+  async function setMain(id, ids){
+    const d = docs.find(x => x.id === id); if(!d) return;
+    for(const x of docs) if(ids.includes(x.id)) x.main = x.id === id; // show it right away
+    render();
+    try{ await call({ action:'main', id, ids: ids.join(',') }); render(); }
+    catch(e){ note('לא הצלחתי לסמן את הווריאציה הראשית. נסה שוב.'); }
   }
 
   async function removeRow(id){
@@ -210,7 +332,7 @@
         const jpg = await toJpeg(f);
         for(let n = 0; ; n++){
           try{ await call({ action:'upload', id, name: f.name.replace(/\.[^.]+$/, '') + '.jpg' }, jpg); break; }
-          catch(e){ if(n >= 2 || (e.code !== 'net' && e.code !== 'db' && e.code !== 'storage')) throw e; await new Promise(r => setTimeout(r, 2000 * (n + 1))); }
+          catch(e){ if(n >= 2 || (e.code !== 'net' && e.code !== 'db' && e.code !== 'storage')) throw e; await sleep(2000 * (n + 1)); }
         }
       }catch(e){ failed.push(`${f.name}: ${ERR[e.code] || 'לא עלתה. נסה להעלות אותה שוב.'}`); note(failed.join('\n')); }
       finally{ uploading[id]--; render(); updateState(); }
@@ -223,7 +345,7 @@
   }
 
   fileEl.addEventListener('change', () => { if(fileTarget) upload(fileTarget, fileEl.files); });
-  $('#add').onclick = addRow; $('#add2').onclick = addRow;
+  $('#add').onclick = $('#add2').onclick = () => addRow('', '', 'category');
 
   (async function start(){
     if(!K){ setState('אין גישה', 'bad'); note('הקישור לא שלם. פתח את הקישור המלא שקיבלת מניל.'); return; }

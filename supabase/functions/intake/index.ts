@@ -54,7 +54,7 @@ Deno.serve(async (req) => {
     return !!data;
   }
   async function list() {
-    const { data: prods, error } = await db.from("products").select("id,name,link,price,created_at,images(id,path,orig,created_at)")
+    const { data: prods, error } = await db.from("products").select("id,category,model,name,link,price,notes,is_main,created_at,images(id,path,orig,created_at)")
       .eq("client", client).order("created_at").order("created_at", { referencedTable: "images" });
     if (error) return fail("db", 500);
     const paths = prods.flatMap((x) => x.images.map((i) => i.path));
@@ -64,7 +64,8 @@ Deno.serve(async (req) => {
       for (const u of s ?? []) if (u.path && u.signedUrl) urls[u.path] = u.signedUrl;
     }
     return out({ ok: true, who: cl!.display, products: prods.map((x) => ({
-      id: x.id, name: x.name, link: x.link, price: x.price === null ? null : Number(x.price),
+      id: x.id, category: x.category, model: x.model, name: x.name, link: x.link, notes: x.notes, main: x.is_main,
+      price: x.price === null ? null : Number(x.price),
       images: x.images.map((i) => ({ f: i.id, orig: i.orig, url: urls[i.path] ?? "" })),
     })) });
   }
@@ -75,7 +76,8 @@ Deno.serve(async (req) => {
     case "add": {
       const { count } = await db.from("products").select("id", { count: "exact", head: true }).eq("client", client);
       if ((count ?? 0) >= MAX_PRODUCTS) return fail("full");
-      const { error } = await db.from("products").insert({ client });
+      // "add a variation to this model": type and model come prefilled
+      const { error } = await db.from("products").insert({ client, category: clean(p.category, 120), model: clean(p.model, 120) });
       return error ? fail("db", 500) : list();
     }
 
@@ -85,6 +87,8 @@ Deno.serve(async (req) => {
       if (!Number.isSafeInteger(t) || t <= 0) return fail("t");
       let patch: Record<string, unknown>;
       if (f === "name") patch = { name: clean(v, 200) };
+      else if (f === "category" || f === "model") patch = { [f]: clean(v, 120) };
+      else if (f === "notes") patch = { notes: String(v).replace(/[\x00-\x09\x0B-\x1F\x7F]/g, "").trim().slice(0, 2000) }; // keeps line breaks
       else if (f === "link") {
         const l = clean(v, 1000);
         if (l && !/^https?:\/\/[^\s]+$/i.test(l)) return fail("link");
@@ -109,6 +113,14 @@ Deno.serve(async (req) => {
       if (e2) return fail("db", 500);
       if (imgs?.length) await db.storage.from("intake").remove(imgs.map((i) => i.path));
       return list();
+    }
+
+    case "main": { // mark the main variation of a model: `ids` = all variations of that model as shown on the page
+      const ids = String(p.ids ?? "").split(",").filter((x) => UUID.test(x)).slice(0, MAX_PRODUCTS);
+      if (!ids.includes(id)) return fail("id");
+      const { error: e1 } = await db.from("products").update({ is_main: false }).eq("client", client).in("id", ids);
+      const { error: e2 } = await db.from("products").update({ is_main: true }).eq("client", client).eq("id", id);
+      return e1 || e2 ? fail("db", 500) : list();
     }
 
     case "rmimg": {
